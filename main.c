@@ -59,7 +59,7 @@ wiz_NetInfo gWIZNETINFO = {
 #define RECEIVE_BUFF_SIZE 128 //tamanho maximo de caracteres a ser recebido* (perguntar pra ter certeza)
 
 //defines do TMP100
-#define TMP100_ADDR        (0x48 << 1)
+#define TMP100_ADDR        0x92
 
 #define TMP100_REG_TEMP    0x00
 #define TMP100_REG_CONFIG  0x01
@@ -79,9 +79,10 @@ uint16_t destination_port = 2222; //define a porta na qual sera procurada quando
 
 uint8_t receive_buff[RECEIVE_BUFF_SIZE];//to receive data from client
 uint8_t sn = 1;//define o socket a ser utilizado podendo ser de 0-7
-uint8_t minha_porta_local = 5000;
+int minha_porta_local = 5000;
 uint8_t snaux = 0;
 uint8_t tmaux = 0;
+float temperatura;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,9 +95,11 @@ static void PrintPHYConf(void);
 static void PrintServerCheck(void);
 void TMP100_Init(void);
 float TMP100_ReadTemp(void);
-void SocketStatus(void);
+void Socket_Status(void);
 void Modo_Client_Sensor_Temp(void);
 void Modo_Server(void);
+void Verificar_Configuracao(void);
+void I2C_Scanner(void);
 
 
 
@@ -140,24 +143,38 @@ int main(void)
   MX_I2C2_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  HAL_Delay(100);
   __HAL_SPI_ENABLE(&hspi1);
   HAL_TIM_Base_Start_IT(&htim2);
 
   printf("My W5500 Application!\r\n");
 
    W5500Init();
+   TMP100_Init();
+   I2C_Scanner();
 
    ctlnetwork(CN_SET_NETINFO, (void*) &gWIZNETINFO);//envia os dados do adapatador definidos anteriormente para inicialializacao
 
-   PHYStatusCheck();//checa a presenca da conexao pelo cabo ethernet ate que haja uma conexao
-   PrintPHYConf();//envia os dados da configuracao do adaptador
+   //PHYStatusCheck();//checa a presenca da conexao pelo cabo ethernet ate que haja uma conexao
+   //PrintPHYConf();//envia os dados da configuracao do adaptador
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+   while (1)
+   {
+	   // Leitura do Sensor
+	   if(tmaux == 1)
+	   {
+		   temperatura = TMP100_ReadTemp();
+		   printf("Temperatura Sala: %.2f C\r\n", temperatura);
+		   tmaux = 0;
+	   }
 
-#if 1
+	   // Imprime na serial para debug
+
+#if 0
 
   while (1)
   {
@@ -167,7 +184,7 @@ int main(void)
 	//Return value of the send() function is the amount of data sent
 	Socket_Status();
 #endif
-#if 1
+#if 0
 	 Modo_Client_Sensor_Temp();
 #endif
 #if 0 //Funcionando como Server
@@ -330,7 +347,7 @@ void PrintServerCheck(void)
 
 void Socket_Status(void)
 {
-	switch(getSn_SR(sn)) // Lê o Status Register do SockeT
+	switch(getSn_SR(sn)) // Lê o Status Register do Socket
 		{
 		    case SOCK_CLOSED:
 			// 1. Se o socket está FECHADO, precisamos abri-lo primeiro.
@@ -353,13 +370,10 @@ void Socket_Status(void)
 				if(destination_ip[0] == 0)
 				{
 					printf("ERRO: IP Zerado. Arrumando...\r\n");
-					// Força o IP aqui se necessário, ou trava
 					break;
 				}
-				// 2. Chama o connect
 				printf("Enviando SYN para %d.%d.%d.%d...\r\n", destination_ip[0], destination_ip[1], destination_ip[2], destination_ip[3]);
 				int8_t ret = connect(sn, destination_ip, destination_port);
-				// 3. Análise do Erro
 				if (ret == SOCK_OK)
 				{
 					printf("Comando aceito. Aguardando resposta do servidor...\r\n");
@@ -376,7 +390,6 @@ void Socket_Status(void)
 					printf("ERRO desconhecido: %d\r\n", ret);
 					close(sn);
 				}
-				// DELAY CRUCIAL: Impede que o erro -4 aconteça em loop infinito
 				HAL_Delay(1000);
 				break;
 				case SOCK_ESTABLISHED:
@@ -390,15 +403,9 @@ void Socket_Status(void)
 					{
 						printf("\r\nConexao Realizada");
 					}
-					// Sua lógica de envio/recebimento de dados entra aqui
-					uint16_t tamanho = getSn_RX_RSR(sn); // Verifica dados recebidos
-					if(tamanho > 0) {
-						recv(sn, receive_buff, tamanho); // Lê os dados
-						}
 					snaux = 1;
 					break;
 				case SOCK_CLOSE_WAIT:
-					// 4. O servidor mandou fechar a conexão (FIN).
 					// Devemos desconectar e fechar o socket para reiniciar o ciclo.
 					disconnect(sn);
 					close(sn);
@@ -407,7 +414,6 @@ void Socket_Status(void)
 					break;
 				default:
 					// Tratamento de erros/timeouts
-					// Se ficar travado em SYN_SENT (tentando conectar) por muito tempo, feche.
 					break;
 		}
 }
@@ -436,6 +442,11 @@ if(snaux == 1 && tmaux == 1)
 			  printf("\r\nSending Success!"); //apensa um retorno pela serial que foi executado com sucesso o envio da mensagem
 		  }
 		  tmaux = 0;
+		  uint16_t tamanho = getSn_RX_RSR(sn); // Verifica dados recebidos
+		  if(tamanho > 0)
+		  {
+			  recv(sn, receive_buff, tamanho); // Lê os dado
+		  }
 	  }
 }
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -614,8 +625,56 @@ float TMP100_ReadTemp(void) {
     }
 }
 
+void Verificar_Configuracao(void) {
+    uint8_t ponteiro = TMP100_REG_CONFIG; // Endereço do registro de config (geralmente 0x01)
+    uint8_t valorLido = 0;
 
+    // PASSO 1: Dizer ao TMP100 que queremos ler o Registro de Configuração
+    // Enviamos apenas o endereço do ponteiro (1 byte)
+    HAL_I2C_Master_Transmit(&hi2c2, TMP100_ADDR, &ponteiro, 1, 100);
 
+    // PASSO 2: Ler o valor que está lá
+    // O registro de configuração do TMP100 tem 1 byte (8 bits)
+    if (HAL_I2C_Master_Receive(&hi2c2, TMP100_ADDR, &valorLido, 1, 100) == HAL_OK) {
+
+        printf("Valor lido no registrador: 0x%02X\r\n", valorLido);
+
+        // Verificação lógica
+        if (valorLido == 0x60) {
+            printf("Sucesso! O sensor esta em 12-bits (0x60).\r\n");
+        } else {
+            printf("Aviso: O valor difere do esperado.\r\n");
+        }
+    } else {
+        printf("Erro ao tentar ler o sensor.\r\n");
+    }
+}
+
+void I2C_Scanner(void) {
+    printf("Iniciando Scanner I2C...\r\n");
+    HAL_StatusTypeDef result;
+    uint8_t i;
+    int dispositivosEncontrados = 0;
+
+    for (i = 1; i < 128; i++) {
+        /*
+         * O HAL requer o endereço deslocado para a esquerda (i << 1).
+         * Tentamos conectar 2 vezes (trials) com timeout de 10ms
+         */
+        result = HAL_I2C_IsDeviceReady(&hi2c2, (uint16_t)(i << 1), 2, 10);
+
+        if (result == HAL_OK) {
+            printf("Dispositivo encontrado no endereco: 0x%02X (HAL: 0x%02X)\r\n", i, (i << 1));
+            dispositivosEncontrados++;
+        }
+    }
+
+    if (dispositivosEncontrados == 0) {
+        printf("Nenhum dispositivo I2C encontrado. Verifique conexoes/pull-ups.\r\n");
+    } else {
+        printf("Scan concluido.\r\n");
+    }
+}
 
 /* USER CODE END 4 */
 
